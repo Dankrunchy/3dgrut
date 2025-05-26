@@ -160,6 +160,8 @@ struct GUTKBufferRenderer : Params {
             particles.featureIntegrateFwd(hitWeight,
                                           Params::PerRayParticleFeatures ? particles.featuresFromBuffer(hitParticle.idx, ray.direction) : tcnn::max(particleFeatures[hitParticle.idx], 0.f),
                                           ray.features);
+
+            if (hitWeight > 0.0f) ray.countHit();
         }
 
         if (ray.transmittance < Particles::MinTransmittanceThreshold) {
@@ -333,17 +335,21 @@ struct GUTKBufferRenderer : Params {
             // Process fetched particles
             for (int j = 0; j < min(GUTParameters::Tiling::BlockSize, tileNumParticlesToProcess); j++) {
 
+                if (__all_sync(GUTParameters::Tiling::WarpMask, !ray.isAlive())) {
+                    break;
+                }
+
                 const PrefetchedRawParticleData particleData = prefetchedRawParticlesData[j];
                 if (particleData.idx == GUTParameters::InvalidParticleIdx) {
-                    i = tileNumBlocksToProcess;
+                    ray.kill();
                     break;
                 }
 
                 DensityRawParameters densityRawParametersGrad;
-                densityRawParametersGrad.density_0    = 0.0f;
-                densityRawParametersGrad.position_0   = make_float3(0.0f);
-                densityRawParametersGrad.quaternion_0 = make_float4(0.0f);
-                densityRawParametersGrad.scale_0      = make_float3(0.0f);
+                densityRawParametersGrad.density    = 0.0f;
+                densityRawParametersGrad.position   = make_float3(0.0f);
+                densityRawParametersGrad.quaternion = make_float4(0.0f);
+                densityRawParametersGrad.scale      = make_float3(0.0f);
 
                 TFeaturesVec featuresGrad = TFeaturesVec::zero();
 

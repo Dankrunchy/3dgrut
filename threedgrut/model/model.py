@@ -24,19 +24,19 @@ from plyfile import PlyData, PlyElement
 
 import threedgrut.model.background as background
 from threedgrut.datasets.protocols import Batch
-from threedgrut.datasets.utils import PointCloud, read_next_bytes, read_colmap_points3D_text
-from threedgrut.model.geometry import nearest_neighbor_dist_cpuKD
+from threedgrut.datasets.utils import read_next_bytes, read_colmap_points3D_text
+from threedgrut.model.geometry import nearest_neighbor_dist_cpuKD, k_nearest_neighbors
 import threedgrt_tracer, threedgut_tracer
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import (
-    get_activation_function, 
+    get_activation_function,
     get_scheduler,
     sh_degree_to_num_features,
     sh_degree_to_specular_dim,
-    to_np, to_torch,
+    to_np, to_torch, quaternion_to_so3
 )
 from threedgrut.utils.render import RGB2SH
-
+from threedgrut.optimizers import SelectiveAdam
 
 class MixtureOfGaussians(torch.nn.Module):
     """ """
@@ -51,6 +51,9 @@ class MixtureOfGaussians(torch.nn.Module):
             "features_albedo",
             "features_specular",
         ]
+
+    def get_positions(self) -> torch.Tensor:
+        return self.positions
 
     def get_features(self):
         return torch.cat((self.features_albedo, self.features_specular), dim=1)
@@ -72,6 +75,21 @@ class MixtureOfGaussians(torch.nn.Module):
             return self.density
         else:
             return self.density_activation(self.density)
+
+    def get_covariance(self) -> torch.Tensor:
+        scales = self.get_scale()
+
+        S = torch.zeros((self.get_num_gaussians(), 3, 3), dtype=scales.dtype, device=self.device)
+        R = quaternion_to_so3(self.get_rotation())
+
+        S[:, 0, 0] = scales[:, 0]
+        S[:, 1, 1] = scales[:, 1]
+        S[:, 2, 2] = scales[:, 2]
+
+        return R @ S @ S.transpose(1, 2) @ R.transpose(1, 2)
+
+    def get_num_gaussians(self) -> int:
+        return len(self.positions)
 
     def get_model_parameters(self) -> dict:
         assert self.optimizer is not None, "Optimizer need to be initialized when storing the checkpoint"
@@ -154,7 +172,7 @@ class MixtureOfGaussians(torch.nn.Module):
             self.renderer = threedgut_tracer.Tracer(conf)
         else:
             raise ValueError(f"Unknown rendering method: {conf.render.method}")
-    
+
     @torch.no_grad()
     def build_acc(self, rebuild=True):
         self.renderer.build_acc(self, rebuild)
@@ -179,7 +197,7 @@ class MixtureOfGaussians(torch.nn.Module):
             points_file = os.path.join(root_path, "colmap", "points3D.txt")
             pts, rgb, _ = read_colmap_points3D_text(points_file)
             file_pts = torch.tensor(pts, dtype=torch.float32, device=self.device)
-            file_rgb = torch.tensor(rgb, dtype=torch.float32, device=self.device)
+            file_rgb = torch.tensor(rgb, dtype=torch.uint8, device=self.device)
 
         else:
             points_file = os.path.join(root_path, "sparse/0", "points3D.bin")
@@ -204,12 +222,12 @@ class MixtureOfGaussians(torch.nn.Module):
                     t_len = read_next_bytes(file, num_bytes=8, format_char_sequence="Q")[0]
                     read_next_bytes(file, num_bytes=8 * t_len, format_char_sequence="ii" * t_len)
 
-            file_rgb = file_rgb / 255.0
-
             file_pts = torch.tensor(file_pts, dtype=torch.float32, device=self.device)
-            file_rgb = torch.tensor(file_rgb, dtype=torch.float32, device=self.device)
+            file_rgb = torch.tensor(file_rgb, dtype=torch.uint8, device=self.device)
 
-        self.default_initialize_from_points(file_pts, observer_pts, file_rgb)
+        assert file_rgb.dtype == torch.uint8, "Expecting RGB values to be in [0, 255] range"
+        self.default_initialize_from_points(file_pts, observer_pts, file_rgb, 
+                                            use_observer_pts=self.conf.initialization.use_observation_points)
 
     def init_from_pretrained_point_cloud(self, pc_path: str, set_optimizable_parameters: bool = True):
         data = PlyData.read(pc_path)
@@ -358,7 +376,8 @@ class MixtureOfGaussians(torch.nn.Module):
             ).contiguous()
 
         dist = torch.clamp_min(nearest_neighbor_dist_cpuKD(fused_point_cloud), 1e-3)
-        scales = torch.log(dist)[..., None].repeat(1, 3)
+        scales = torch.log(dist * self.conf.model.default_scale_factor)[..., None].repeat(1, 3)
+
         rots = torch.rand((num_gaussians, 4), device=self.device)
         rots[:, 0] = 1
 
@@ -398,17 +417,7 @@ class MixtureOfGaussians(torch.nn.Module):
             self.setup_optimizer(state_dict=checkpoint["optimizer"])
         self.validate_fields()
 
-    def init_from_lidar(self, point_cloud: PointCloud, observer_pts):
-        """
-        Observer points can be any set locations that observation came from. Camera centers, ray source points, etc. They are used to esimate initial scales.
-        """
-
-        logger.info(f"Initializing based on lidar point cloud ...")
-
-        # only initialize by default from points for now
-        self.default_initialize_from_points(point_cloud.xyz_end.to(device=self.device), observer_pts, point_cloud.color)
-
-    def default_initialize_from_points(self, pts, observer_pts, colors=None):
+    def default_initialize_from_points(self, pts, observer_pts, colors=None, use_observer_pts=True):
         """
         Given an Nx3 array of points (and optionally Nx3 rgb colors),
         initialize default values for the other parameters of the model
@@ -419,13 +428,21 @@ class MixtureOfGaussians(torch.nn.Module):
         N = pts.shape[0]
         positions = pts
 
-        # identity rotations
-        rots = torch.zeros((N, 4), dtype=dtype, device=self.device)
-        rots[:, 0] = 1.0  # they're quaternions
+        # Random rotations
+        rots = torch.rand((N, 4), dtype=dtype, device=self.device)
 
-        # estimate scales based on distances to observers
-        dist_to_observers = torch.clamp_min(nearest_neighbor_dist_cpuKD(pts, observer_pts), 1e-7)
-        observation_scale = dist_to_observers * self.conf.initialization.observation_scale_factor
+        if use_observer_pts:
+            # NOTE: it seems we get different scales compared to the original 3DGS implementation
+            # estimate scales based on distances to observers
+            dist_to_observers = torch.clamp_min(nearest_neighbor_dist_cpuKD(pts, observer_pts), 1e-7)
+            observation_scale = dist_to_observers * self.conf.initialization.observation_scale_factor
+        else:
+            # Initialize the GS size to be the average dist of the 3 nearest neighbors
+            dist2_avg = (k_nearest_neighbors(pts, 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
+            observation_scale = torch.sqrt(dist2_avg)
+
+        observation_scale = observation_scale * self.conf.model.default_scale_factor
+
         scales = self.scale_activation_inv(observation_scale)[:, None].repeat(1, 3)
 
         # set density as a constant
@@ -433,11 +450,11 @@ class MixtureOfGaussians(torch.nn.Module):
             torch.full((N, 1), fill_value=self.conf.model.default_density, dtype=dtype, device=self.device)
         )
 
-        # set colors, constant if they weren't given
+        # set colors, random if they weren't given
         if colors is None:
-            features_albedo = torch.rand((N, 3), dtype=dtype, device=self.device) / 255.0
-        else:
-            features_albedo = to_torch(RGB2SH(to_np(colors.float() / 255.0)), device=self.device)
+            colors = torch.randint(0, 256, (N, 3), dtype=torch.uint8, device=self.device)
+
+        features_albedo = to_torch(RGB2SH(to_np(colors.float() / 255.0)), device=self.device)
 
         num_specular_dims = sh_degree_to_specular_dim(self.max_n_features)
         features_specular = torch.zeros((N, num_specular_dims))
@@ -457,6 +474,8 @@ class MixtureOfGaussians(torch.nn.Module):
         params = []
         for name, args in self.conf.optimizer.params.items():
             module = getattr(self, name)
+
+            # If the module is a torch.nn.Module, we can add all of its trainable parameters to the optimizer
             if isinstance(module, torch.nn.Module):
                 module_parameters = filter(lambda p: p.requires_grad and len(p) > 0, module.parameters())
                 n_params = sum([np.prod(p.size(), dtype=int) for p in module_parameters])
@@ -464,11 +483,23 @@ class MixtureOfGaussians(torch.nn.Module):
                 if n_params > 0:
                     params.append({"params": module.parameters(), "name": name, **args})
 
+            # If the module is a torch.nn.Parameter, we can add it to the optimizer
             elif isinstance(module, torch.nn.Parameter):
                 if module.requires_grad:
                     params.append({"params": [module], "name": name, **args})
 
-        self.optimizer = torch.optim.Adam(params, lr=self.conf.optimizer.lr, eps=self.conf.optimizer.eps)
+        if self.conf.optimizer.type == "adam":
+            self.optimizer = torch.optim.Adam(params, lr=self.conf.optimizer.lr, eps=self.conf.optimizer.eps)
+            logger.info("🔆 Using Adam optimizer")
+        elif self.conf.optimizer.type == "selective_adam":
+            self.optimizer = SelectiveAdam(params, lr=self.conf.optimizer.lr, eps=self.conf.optimizer.eps)
+            logger.info("🔆 Using Selective Adam optimizer")
+        else:
+            raise ValueError(f"Unknown optimizer type: {self.conf.optimizer.type}")
+
+        for param_group in self.optimizer.param_groups:
+            if param_group["name"] == "positions":
+                param_group["lr"] *= self.scene_extent  # Multiply the position lr by the scene scale
 
         self.setup_scheduler()
 
@@ -560,14 +591,13 @@ class MixtureOfGaussians(torch.nn.Module):
 
     def forward(self, batch: Batch, train=False, frame_id=0) -> dict[str, torch.Tensor]:
         """
-        Args: 
+        Args:
             batch: a Batch structure containing the input data
             train: a boolean indicating whether the model is in training mode
             frame_id: an integer indicating the frame id (default is 0)
         Returns:
             A dictionary containing the output of the model
         """
-
         return self.renderer.render(self, batch, train, frame_id)
 
     def trace(self, rays_o, rays_d, T_to_world=None):
@@ -709,7 +739,7 @@ class MixtureOfGaussians(torch.nn.Module):
         mogt_albedo[:, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
         mogt_albedo[:, 1] = np.asarray(plydata.elements[0]["f_dc_1"])
         mogt_albedo[:, 2] = np.asarray(plydata.elements[0]["f_dc_2"])
-        
+
         extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
         extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
         num_speculars = (self.max_n_features + 1) ** 2 - 1
@@ -740,7 +770,7 @@ class MixtureOfGaussians(torch.nn.Module):
         self.rotation = torch.nn.Parameter(torch.tensor(mogt_rotation,dtype=self.rotation.dtype,device=self.device))
 
         self.n_active_features = self.max_n_features
-        
+
         if init_model:
             self.set_optimizable_parameters()
             self.setup_optimizer()

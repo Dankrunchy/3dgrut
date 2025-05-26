@@ -561,6 +561,29 @@ class MixtureOfGaussians(torch.nn.Module):
         mask[0, :active_features] = 1.0
         return mask
 
+    def set_gaussian(self, position, scale, rotation, color, density):
+        """very rudimentary function to set a single gaussian to be renderd
+        """
+        position = position.reshape(1,3)
+        scale = self.scale_activation_inv(scale.reshape(1,3))
+        rotation = rotation.reshape(1,4)
+        density = self.density_activation_inv( density.reshape(1,1) )
+        
+        self.positions = torch.nn.Parameter(position.requires_grad_(True))
+        self._normal = torch.nn.Parameter(torch.ones_like(position).requires_grad_(True))
+        self.rotation = torch.nn.Parameter(rotation.requires_grad_(True))
+        self.scale = torch.nn.Parameter(scale.requires_grad_(True))
+        self.density = torch.nn.Parameter(density.requires_grad_(True))
+        self.features_albedo = torch.nn.Parameter(color.reshape(1,3).contiguous().requires_grad_(True))
+
+        self.features_specular = torch.nn.Parameter(torch.zeros((1,3), dtype=torch.float32, device="cuda").contiguous().requires_grad_(True))
+        
+    def set_density(self, mask, density):
+        updated_densities = self.density.clone()
+        updated_densities[mask] = density
+        optimizable_tensors = self.replace_tensor_to_optimizer(updated_densities, "density")
+        self.density = optimizable_tensors["density"]
+
     def clamp_density(self):
         updated_densities = torch.clamp(self.get_density(), min=1e-4, max=1.0 - 1e-4)
         optimizable_tensors = self.replace_tensor_to_optimizer(updated_densities, "density")

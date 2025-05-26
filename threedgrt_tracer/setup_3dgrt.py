@@ -46,6 +46,11 @@ def setup_3dgrt(conf):
     slang_build_env["PATH"] += os.path.join(os.path.dirname(slang_mod.__file__), "bin")
     slang_build_inc_dir = os.path.join(os.path.dirname(__file__), "include")
     slang_build_file_dir = os.path.join(os.path.dirname(__file__), "include", "3dgrt", "kernels", "slang")
+    
+    # To make it work on my system
+    slang_build_env["CC"] = "gcc-11"
+    slang_build_env["CXX"] = "g++-11"
+
     subprocess.check_call(
         [
             "slangc",

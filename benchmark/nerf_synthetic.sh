@@ -29,10 +29,10 @@ RESULT_DIR=${RESULT_DIR:-"results/nerf_synthetic"}
 EXTRA_ARGS=${@:2} # any extra arguments to pass to the script
 
 # if the result directory already exists, warn user and aport execution
-if [ -d "$RESULT_DIR" ]; then
-    echo "Result directory $RESULT_DIR already exists. Aborting execution."
-    exit 1
-fi
+# if [ -d "$RESULT_DIR" ]; then
+#     echo "Result directory $RESULT_DIR already exists. Aborting execution."
+#     exit 1
+# fi
 
 mkdir -p $RESULT_DIR
 export TORCH_EXTENSIONS_DIR=$RESULT_DIR/.cache

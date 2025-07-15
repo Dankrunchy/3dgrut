@@ -99,6 +99,8 @@ class BasicCamera:
     def get_batch(self, ground_truth: Tensor = None) -> Batch:
         """returns 'batch' with information for renderer (camera rays)"""
         T_to_world = torch.eye(4, dtype=self.rays_o_cam.dtype, device=self.rays_o_cam.device)[None]
+        # print(self.rays_o_cam.shape)
+        # T_to_world[0, :3, 3] = -self.rays_o_cam[0, 0, 0]
         sample = {
             "rgb_gt":       ground_truth,
             "rays_ori":     self.rays_o_cam,
@@ -116,6 +118,6 @@ class BasicCamera:
         )
         
         self.model.build_acc(True)
-        outputs = self.model(gpu_batch, train=True, frame_id=1000)
+        outputs = self.model(gpu_batch, train=True, frame_id=1)
         
         return outputs["pred_rgb"].squeeze()

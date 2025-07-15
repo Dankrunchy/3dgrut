@@ -16,11 +16,16 @@
 from typing import Optional
 
 import torch
+import numpy as np
+from numpy.typing import NDArray
+from pathlib import Path
 
 from threedgrut.model.model import MixtureOfGaussians
 from threedgrut.strategy.base import BaseStrategy
 from threedgrut.utils.logger import logger
 from threedgrut.utils.misc import quaternion_to_so3, check_step_condition
+
+from torch.utils.tensorboard import SummaryWriter
 
 
 class GSStrategy(BaseStrategy):
@@ -72,12 +77,118 @@ class GSStrategy(BaseStrategy):
 
         return False
 
-    def post_optimizer_step(self, step: int, scene_extent: float, train_dataset, batch=None, writer=None) -> bool:
+
+    @torch.no_grad
+    def debug_histograms(self, _path: str|None, iteration: int, grads = None, bin_count: int = 1000, 
+                         min_grad: float = None, tb_writer: SummaryWriter = None):
+        """For Debugging and Introspection
+
+        Args:
+            _path (Path | str | None): Path to folder of where to store graphs. If None then written only to Tensorboard if available
+            iteration (int): Which iteration during traniing
+            grads (_type_, optional): Accumulated gradient. If None then calculated on the fly. Defaults to None.
+            bin_count (int, optional): Amount of bins for histograms. Defaults to 1000.
+            min_grad (float, optional): The densification threshold. If None not drawn in graphic. Defaults to None.
+            tb_writer (SummaryWriter, optional): Tensorboard Writer. Defaults to None.
+        """
+        def add_to_tb_writer(title: str, values: NDArray):
+            if tb_writer:
+                values = values.astype(float).reshape(-1)
+                sum_sq = values.dot(values)
+                
+                tb_writer.add_histogram_raw(
+                    tag=title,
+                    min=values.min(),
+                    max=values.max(),
+                    num=len(values),
+                    sum=values.sum(),
+                    sum_squares=sum_sq,
+                    bucket_limits=bins[1:].tolist(),
+                    bucket_counts=counts.tolist(),
+                    global_step=iteration)
+        
+        if grads is None:
+            grads = self.densify_grad_norm_accum / self.densify_grad_norm_denom
+            # if division by zero in self.denom
+            grads = torch.nan_to_num(grads, 1e-12, 1e-12, 1e-12, out=grads)
+
+        _grads_np = grads.cpu().numpy()
+        counts, bins = np.histogram(_grads_np, bins=bin_count)
+        
+        # skip lowest grad count (with most gaussians)
+        # f = plt.figure(figsize=(12, 8))
+        # plt.hist(bins[:-1], bins, weights=counts, log=True)
+        # plt.title(f'Grad Distribution iteration {iteration}')
+        # plt.xlabel("Accumulated Grad")
+        # plt.ylabel("Amount of Gaussians")
+        # path = Path(_path, "graphs", f"grads_{iteration}.png")
+        if _path is not None:
+            path = Path(_path, "graphs", "gradients", f"grads_{iteration}.npy")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # plt.savefig( str(path) )
+            np.save(path, np.asarray( [counts, bins, grads.shape[0]], dtype=object ))
+        
+        add_to_tb_writer('Accumulated Gradients Distribution', _grads_np)
+        
+        # scale distribution
+        _scales_np = self.model.get_scale(False).cpu().numpy()
+        counts, bins = np.histogram(_scales_np, bins=bin_count)
+        
+        if _path is not None:
+            path = Path(_path, "graphs", "scales", f"scales_{iteration}.npy")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # plt.savefig( str(path) )
+            np.save(path, np.asarray( [counts, bins, grads.shape[0]], dtype=object ))
+        
+        add_to_tb_writer('Scale Distribution', _scales_np)
+        
+        # density distribution
+        _density_np = self.model.get_density(False).cpu().numpy()
+        counts, bins = np.histogram(_density_np, bins=bin_count)
+        
+        if _path is not None:
+            path = Path(_path, "graphs", "densities", f"densities_{iteration}.npy")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # plt.savefig( str(path) )
+            np.save(path, np.asarray( [counts, bins, grads.shape[0]], dtype=object ))
+        
+        add_to_tb_writer('Density Distribution', _density_np)
+        
+        # Plot scale/grad correlation
+        import matplotlib.pyplot as plt
+        f = plt.figure(figsize=(12, 8))
+        plt.scatter( grads.detach().cpu().numpy(), torch.clamp(torch.prod(self.model.get_scale(False), dim=-1), 1e-12).detach().cpu().numpy(),
+                     s=2.5 )
+        plt.grid(True, which="both", linestyle="--", linewidth=0.5)  # Background grid
+        plt.xscale("log") # gradients can get very big, so use log scale
+        plt.yscale("log")
+        
+        if min_grad:
+            plt.axvline(x=min_grad, color='red', linestyle='--', linewidth=1.0, label="Densification Threshold")
+            plt.legend()
+        
+        title_pre = f"{Path(_path).name}: " if _path is not None else ""
+        plt.title(f'{title_pre}Accumulated Gradient - Scale Correlation, iteration {iteration}')
+        plt.xlabel("Accumulated Grad")
+        plt.ylabel('"Volume" (product of all axes)')
+        
+        if _path is not None:
+            path = Path(_path, "graphs", "correlations")
+            path.mkdir(exist_ok=True, parents=True)
+            plt.savefig( str(path / f"corr_{iteration}.png") )
+        plt.close()
+        
+        if tb_writer:
+            tb_writer.add_figure("Accumulated Gradient - Scale Correlation", f, global_step=iteration)
+
+
+    def post_optimizer_step(self, step: int, scene_extent: float, train_dataset, batch=None, writer=None, tb_writer=None) -> bool:
         """Callback function to be executed after the `loss.backward()` call."""
         scene_updated = False
         # Densify the Gaussians
 
         if check_step_condition(step, self.conf.strategy.densify.start_iteration, self.conf.strategy.densify.end_iteration, self.conf.strategy.densify.frequency):
+            self.debug_histograms(None, step, min_grad=self.clone_grad_threshold, tb_writer=writer)
             self.densify_gaussians(scene_extent=scene_extent)
             scene_updated = True
 

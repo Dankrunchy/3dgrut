@@ -576,8 +576,12 @@ class MixtureOfGaussians(torch.nn.Module):
         self.density = torch.nn.Parameter(density.requires_grad_(True))
         self.features_albedo = torch.nn.Parameter(color.reshape(1,3).contiguous().requires_grad_(True))
 
-        self.features_specular = torch.nn.Parameter(torch.zeros((1,3), dtype=torch.float32, device="cuda").contiguous().requires_grad_(True))
-        
+        specular_sh_dims = sh_degree_to_specular_dim(self.max_n_features)
+        self.features_specular = torch.nn.Parameter(torch.zeros((1, specular_sh_dims), dtype=torch.float32, device="cuda").contiguous().requires_grad_(True))
+        self.validate_fields()
+
+    # def add_gaussian(self, position)
+
     def set_density(self, mask, density):
         updated_densities = self.density.clone()
         updated_densities[mask] = density

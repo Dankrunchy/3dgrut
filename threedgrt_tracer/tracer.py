@@ -117,6 +117,9 @@ class Tracer:
                 particle_density,
                 mog_sph,
             ) = ctx.saved_variables
+            # breakpoint()
+            # assert torch.any(ray_radiance_grd != 0)
+            
             frame_id = ctx.frame_id
             particle_density_grd, mog_sph_grd = ctx.tracer_wrapper.trace_bwd(
                 frame_id,
@@ -140,6 +143,13 @@ class Tracer:
             mog_pos_grd, mog_dns_grd, mog_rot_grd, mog_scl_grd, _ = torch.split(
                 particle_density_grd, [3, 1, 4, 3, 1], dim=1
             )
+
+            # if (mog_sph_grd == 0.0).all():
+            #     print("NO SH GRAD")
+            
+            # if (mog_sph_grd != 0.0).any():
+            #     print("SH GRAD")
+
             return (
                 None,
                 None,

@@ -72,6 +72,7 @@ def load(
         "--extended-lambda",
         "--expt-relaxed-constexpr",
         "-Xcompiler=-fno-strict-aliasing",
+        "-Xcompiler=-fno-gnu-unique",
     ]
     if extra_cuda_cflags is not None:
         cuda_cflags += extra_cuda_cflags

@@ -676,7 +676,7 @@ class Trainer3DGRUT:
                 logger.warning("Terminating training from GUI window is not supported. Please terminate it from the terminal.")
 
     @torch.cuda.nvtx.range(f"run_train_pass")
-    def run_train_pass(self, conf: DictConfig):
+    def run_train_pass(self, conf: DictConfig, tb_writer = None):
         """Runs a single train epoch over the dataset."""
         global_step = self.global_step
         model = self.model
@@ -744,7 +744,7 @@ class Trainer3DGRUT:
             # Post backward strategy step
             with torch.cuda.nvtx.range(f"train_{global_step}_post_opt_step"):
                 scene_updated = self.strategy.post_optimizer_step(
-                    step=global_step, scene_extent=self.scene_extent, train_dataset=self.train_dataset, batch=gpu_batch, writer=self.tracking.writer
+                    step=global_step, scene_extent=self.scene_extent, train_dataset=self.train_dataset, batch=gpu_batch, writer=self.tracking.writer, tb_writer=tb_writer
                 )
 
             # Update the SH if required
@@ -856,8 +856,16 @@ class Trainer3DGRUT:
         # Training loop
         logger.start_progress(task_name="Training", total_steps=conf.n_iterations, color="spring_green1")
 
+        # create 
+        # from torch.utils.tensorboard import SummaryWriter
+        # from datetime import datetime
+        # tb_writer = None
+        # run_date = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # tb_writer = SummaryWriter( Path(conf.out_dir) / "runs" / run_date )
+        tb_writer = None
+
         for epoch_idx in range(self.n_epochs):
-            self.run_train_pass(conf)
+            self.run_train_pass(conf, tb_writer)
 
         logger.end_progress(task_name="Training")
 

@@ -121,6 +121,7 @@ extern "C" __global__ void __raygen__rg() {
 
     float2 minMaxT       = intersectAABB(params.aabb, rayOrigin, rayDirection);
     constexpr float epsT = 1e-9;
+    // constexpr float epsT = 1e-3;
 
     float rayLastHitDistance = fmaxf(0.0f, minMaxT.x - epsT);
     RayPayload rayPayload;

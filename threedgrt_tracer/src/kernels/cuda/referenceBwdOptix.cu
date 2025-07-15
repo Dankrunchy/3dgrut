@@ -119,6 +119,7 @@ extern "C" __global__ void __raygen__rg() {
     float rayHitDistanceGrad   = params.rayHitDistanceGrad[idx.z][idx.y][idx.x][0];
 
     constexpr float epsT = 1e-9;
+    // constexpr float epsT = 1e-3;
 
     float2 minMaxT   = intersectAABB(params.aabb, rayOrigin, rayDirection);
     float startT     = fmaxf(0.0f, minMaxT.x - epsT);
@@ -133,6 +134,12 @@ extern "C" __global__ void __raygen__rg() {
     while (startT < endT) {
         trace(rayPayload, rayOrigin, rayDirection, startT + epsT, endT);
         if (rayPayload[0].particleId == RayHit::InvalidParticleId) {
+            // printf("invalid particle break\n");
+            // printf("id %d, %d, %d\t startT %f\n", idx.x, idx.y, idx.z, startT);
+            // printf("id %d, %d, %d\t distance %f\n", idx.x, idx.y, idx.z, rayPayload[0].distance);
+            // printf("id %d, %d, %d\t origin %f, %f, %f\n", idx.x, idx.y, idx.z, rayOrigin.x, rayOrigin.y, rayOrigin.z);
+            // printf("id %d, %d, %d\t direction %f, %f, %f\n", idx.x, idx.y, idx.z, rayDirection.x, rayDirection.y, rayDirection.z);
+
             break;
         }
 
